@@ -1,0 +1,309 @@
+version: '3.8'
+
+services:
+  # OpenSTF - Smartphone Test Farm para controle de dispositivos
+  openstf-app:
+    image: openstf/stf:latest
+    container_name: mde-openstf-app
+    command: stf app --port 3000 --auth-url http://localhost:3100/auth/mock/ --websocket-url ws://localhost:3100/
+    ports:
+      - "3000:3000"
+    environment:
+      - RETHINKDB_PORT_28015_TCP_ADDR=rethinkdb
+    depends_on:
+      - rethinkdb
+      - adb
+    networks:
+      - mde-network
+
+  openstf-processor:
+    image: openstf/stf:latest
+    container_name: mde-openstf-processor
+    command: stf processor --connect-app-dealer tcp://openstf-triproxy-app:7160 --connect-dev-dealer tcp://openstf-triproxy-dev:7260
+    depends_on:
+      - rethinkdb
+      - openstf-triproxy-app
+      - openstf-triproxy-dev
+    networks:
+      - mde-network
+
+  openstf-triproxy-app:
+    image: openstf/stf:latest
+    container_name: mde-openstf-triproxy-app
+    command: stf triproxy app --bind-pub "tcp://*:7150" --bind-dealer "tcp://*:7160" --bind-pull "tcp://*:7170"
+    ports:
+      - "7150:7150"
+      - "7160:7160"
+      - "7170:7170"
+    networks:
+      - mde-network
+
+  openstf-triproxy-dev:
+    image: openstf/stf:latest
+    container_name: mde-openstf-triproxy-dev
+    command: stf triproxy dev --bind-pub "tcp://*:7250" --bind-dealer "tcp://*:7260" --bind-pull "tcp://*:7270"
+    ports:
+      - "7250:7250"
+      - "7260:7260"
+      - "7270:7270"
+    networks:
+      - mde-network
+
+  openstf-provider:
+    image: openstf/stf:latest
+    container_name: mde-openstf-provider
+    command: stf provider --name "MDE Provider" --connect-sub tcp://openstf-triproxy-dev:7250 --connect-push tcp://openstf-triproxy-dev:7270 --storage-url http://localhost:3100/ --public-ip localhost --min-port=15000 --max-port=25000 --heartbeat-interval 10000 --screen-ws-url-pattern "ws://localhost:3100/d/floor4/<%= serial %>/<%= publicPort %>/" --adb-host adb --adb-port 5037 --vnc-initial-size 600x800
+    ports:
+      - "15000-25000:15000-25000"
+    depends_on:
+      - adb
+      - openstf-triproxy-dev
+    networks:
+      - mde-network
+
+  openstf-reaper:
+    image: openstf/stf:latest
+    container_name: mde-openstf-reaper
+    command: stf reaper dev --connect-push tcp://openstf-triproxy-dev:7270 --connect-sub tcp://openstf-triproxy-app:7150 --heartbeat-timeout 30000
+    depends_on:
+      - openstf-triproxy-dev
+      - openstf-triproxy-app
+    networks:
+      - mde-network
+
+  # RethinkDB - Banco de dados para OpenSTF
+  rethinkdb:
+    image: rethinkdb:latest
+    container_name: mde-rethinkdb
+    ports:
+      - "28015:28015"
+      - "29015:29015"
+      - "8080:8080"
+    volumes:
+      - rethinkdb-data:/data
+    networks:
+      - mde-network
+
+  # ADB Server - Android Debug Bridge
+  adb:
+    image: sorccu/adb:latest
+    container_name: mde-adb
+    privileged: true
+    ports:
+      - "5037:5037"
+    networks:
+      - mde-network
+
+  # Waydroid - Container Android
+  waydroid:
+    image: quay.io/waydroid/waydroid:latest
+    container_name: mde-waydroid
+    privileged: true
+    volumes:
+      - /dev/binder:/dev/binder
+      - /dev/ashmem:/dev/ashmem
+      - waydroid-data:/var/lib/waydroid
+    ports:
+      - "5555:5555"
+    environment:
+      - WAYDROID_FORCE_MULTI_WIN=1
+    networks:
+      - mde-network
+
+  # Ollama - IA Local
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mde-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - mde-network
+
+  # Open-WebUI - Interface para IA
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: mde-open-webui
+    ports:
+      - "8081:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - ollama
+    networks:
+      - mde-network
+
+  # Mailu - Email Server (Temporário)
+  mailu-front:
+    image: mailu/nginx:latest
+    container_name: mde-mailu-front
+    restart: always
+    env_file: ./mailu.env
+    ports:
+      - "8082:80"
+      - "8443:443"
+      - "25:25"
+      - "465:465"
+      - "587:587"
+      - "110:110"
+      - "995:995"
+      - "143:143"
+      - "993:993"
+    volumes:
+      - mailu-certs:/certs
+    networks:
+      - mde-network
+
+  mailu-admin:
+    image: mailu/admin:latest
+    container_name: mde-mailu-admin
+    restart: always
+    env_file: ./mailu.env
+    volumes:
+      - mailu-data:/data
+    depends_on:
+      - redis
+    networks:
+      - mde-network
+
+  mailu-imap:
+    image: mailu/dovecot:latest
+    container_name: mde-mailu-imap
+    restart: always
+    env_file: ./mailu.env
+    volumes:
+      - mailu-mail:/mail
+    depends_on:
+      - mailu-front
+    networks:
+      - mde-network
+
+  mailu-smtp:
+    image: mailu/postfix:latest
+    container_name: mde-mailu-smtp
+    restart: always
+    env_file: ./mailu.env
+    volumes:
+      - mailu-data:/data
+    depends_on:
+      - mailu-front
+    networks:
+      - mde-network
+
+  # Redis - Cache para Mailu
+  redis:
+    image: redis:alpine
+    container_name: mde-redis
+    restart: always
+    volumes:
+      - redis-data:/data
+    networks:
+      - mde-network
+
+  # Backend Node.js - API Principal
+  backend-nodejs:
+    build: ./backend-nodejs
+    container_name: mde-backend-nodejs
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongodb:27017/mde
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_URL=http://ollama:11434
+      - OPENSTF_URL=http://openstf-app:3000
+    depends_on:
+      - mongodb
+      - redis
+      - ollama
+      - openstf-app
+    volumes:
+      - ./backend-nodejs:/app
+      - /app/node_modules
+    networks:
+      - mde-network
+
+  # Backend FastAPI - API Python
+  backend-fastapi:
+    build: ./backend-fastapi
+    container_name: mde-backend-fastapi
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017/mde
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      - mongodb
+      - redis
+      - ollama
+    volumes:
+      - ./backend-fastapi:/app
+    networks:
+      - mde-network
+
+  # MongoDB - Banco de dados
+  mongodb:
+    image: mongo:latest
+    container_name: mde-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=mde_admin_2025
+      - MONGO_INITDB_DATABASE=mde
+    volumes:
+      - mongodb-data:/data/db
+    networks:
+      - mde-network
+
+  # Frontend Next.js
+  frontend:
+    build: ./frontend
+    container_name: mde-frontend
+    ports:
+      - "3100:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:4000
+      - NEXT_PUBLIC_OPENSTF_URL=http://localhost:3000
+    depends_on:
+      - backend-nodejs
+      - backend-fastapi
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - mde-network
+
+  # SMS Gateway - Android SMS Gateway
+  sms-gateway:
+    image: capcom6/android-sms-gateway:latest
+    container_name: mde-sms-gateway
+    ports:
+      - "8083:8080"
+    environment:
+      - SMS_LOGIN=admin
+      - SMS_PASSWORD=mde_sms_2025
+    networks:
+      - mde-network
+
+volumes:
+  rethinkdb-data:
+  waydroid-data:
+  ollama-data:
+  open-webui-data:
+  mailu-certs:
+  mailu-data:
+  mailu-mail:
+  redis-data:
+  mongodb-data:
+
+networks:
+  mde-network:
+    driver: bridge
